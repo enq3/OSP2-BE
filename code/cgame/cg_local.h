@@ -2167,7 +2167,7 @@ typedef struct
 	newStatsInfo_t newStats;
 	newStatsInfo_t statsAll[MAX_CLIENTS];
 	int             itemCatalogMode; /* CS 890 leading hex nibble: bitmask 1=shadow 2=pui 4=spawns 8=tpexit */
-	qboolean        serverHasXName; /* some CS_PLAYERS carried "xn" (extended name), set in CG_NewClientInfo */
+	qboolean        serverHasBEName; /* some CS_PLAYERS carried the "bn" key (the server's be_name), set in CG_NewClientInfo */
 } cgs_t;
 
 /* Crosshair colors/distance (top-level global) */
@@ -2202,7 +2202,7 @@ extern  itemInfo_t      cg_items[MAX_ITEMS];
 extern  markPoly_t      cg_markPolys[MAX_MARK_POLYS];
 
 extern vmCvar_t           osp_client;
-extern vmCvar_t           cg_xName;
+extern vmCvar_t           cg_beName;
 extern vmCvar_t           osp_hidden;
 extern vmCvar_t           osp_debug;
 extern vmCvar_t           cg_autoswitch;
@@ -2812,6 +2812,7 @@ extern int cvarTableSize;
 
 const char* CG_ConfigString(int index);
 const char* CG_ConfigStringName(const char* info);
+void CG_SyncBEName(void);
 const char* CG_Argv(int arg);
 
 void QDECL CG_Printf(const char* msg, ...);

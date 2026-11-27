@@ -1850,6 +1850,7 @@ void CG_DrawActiveFrame(int serverTime, stereoFrame_t stereoView, qboolean demoP
 	cg.demoPlayback = demoPlayback;
 
 	CG_UpdateCvars(0);
+	CG_SyncBEName();
 
 	// if we are only updating the screen as a loading
 	// pacifier, don't even try to read snapshots

@@ -12,26 +12,34 @@ typedef struct chatFilterTableNode_s
 
 static chatFilterTableNode_t chatFilterNames[CG_CHATFILTER_MAX];
 
+static int ChatReadableCopy(const char* in, char* out, int outSize);
+
+/*
+Names are filed and compared by their readable text (colour codes and chat
+escape characters skipped): a player is muted under the coded name of the
+player string, while xq3osp chat lines carry the name without colour codes
+*/
 static chatFilterTableNode_t* CG_ChatfilterFindName(const char* name)
 {
 	unsigned long hash;
 	chatFilterTableNode_t* target;
-	qboolean isNotFound = qfalse;
+	char readable[MAX_CLIENTNAME];
 
-	hash = Com_GenerateHashValue(name, CG_CHATFILTER_MAX);
+	if (!ChatReadableCopy(name, readable, sizeof(readable)))
+	{
+		return NULL; //nothing readable in the name
+	}
+
+	hash = Com_GenerateHashValue(readable, CG_CHATFILTER_MAX);
 
 	target = &chatFilterNames[hash];
 
-	while (target && (isNotFound = Q_stricmp(name, target->name)))
+	while (target && (!target->name || Q_stricmp(readable, target->name)))
 	{
 		target = target->next;
 	}
-	if (!isNotFound)
-	{
-		return target; //found
-	}
 
-	return NULL; //not found
+	return target; //NULL when not found
 }
 
 void CG_ChatfilterDump(void)
@@ -115,17 +123,20 @@ void CG_ChatfilterDeleteName(const char* name)
 {
 	unsigned long hash;
 	chatFilterTableNode_t* target;
-	qboolean isNotFound = qfalse;
+	char readable[MAX_CLIENTNAME];
 
-	hash = Com_GenerateHashValue(name, CG_CHATFILTER_MAX);
-
-	target = &chatFilterNames[hash];
-
-	while (target && (isNotFound = Q_stricmp(name, target->name)))
+	if (!ChatReadableCopy(name, readable, sizeof(readable)))
 	{
-		target = target->next;
+		return;
 	}
-	if (isNotFound) return;
+
+	target = CG_ChatfilterFindName(name);
+	if (!target)
+	{
+		return;
+	}
+
+	hash = Com_GenerateHashValue(readable, CG_CHATFILTER_MAX);
 
 	if (target == &chatFilterNames[hash])
 	{
@@ -157,14 +168,21 @@ void CG_ChatfilterAddName(const char* name)
 {
 	unsigned long hash;
 	chatFilterTableNode_t* target;
-	int len = strlen(name);
+	char readable[MAX_CLIENTNAME];
+	int len;
+
+	len = ChatReadableCopy(name, readable, sizeof(readable));
+	if (!len)
+	{
+		return;
+	}
 
 	if (CG_ChatfilterFindName(name))
 	{
 		return;
 	}
 
-	hash = Com_GenerateHashValue(name, CG_CHATFILTER_MAX);
+	hash = Com_GenerateHashValue(readable, CG_CHATFILTER_MAX);
 
 	target = &chatFilterNames[hash];
 
@@ -183,7 +201,7 @@ void CG_ChatfilterAddName(const char* name)
 	target->name = Z_Malloc(len + 1);
 	OSP_MEMORY_CHECK(target->name);
 
-	Q_strncpyz(target->name, name, len + 1);
+	Q_strncpyz(target->name, readable, len + 1);
 }
 
 qboolean CG_ChatExtractSenderName(const char* message, char* name, int nameSize)
@@ -246,11 +264,136 @@ static int CG_ChatClientNumFromBracketId(const char* senderName)
 	return clientNum;
 }
 
+static qboolean ChatIsHexColor(int c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int ChatLower(int c)
+{
+	if (c >= 'A' && c <= 'Z')
+	{
+		return c + 32;
+	}
+	return c;
+}
+
+/* past the colour codes and chat escape characters at s */
+static const char* ChatSkipColors(const char* s)
+{
+	while (s[0] == 25 || (s[0] == '^' && s[1]))
+	{
+		if (s[0] == 25)
+		{
+			s++;
+			continue;
+		}
+		if ((s[1] == 'x' || s[1] == 'X') &&
+		        ChatIsHexColor(s[2]) && ChatIsHexColor(s[3]) && ChatIsHexColor(s[4]) &&
+		        ChatIsHexColor(s[5]) && ChatIsHexColor(s[6]) && ChatIsHexColor(s[7]))
+		{
+			s += 6;
+		}
+		else if (s[1] == '^')
+		{
+			break;      /* escaped caret: a readable character */
+		}
+		s += 2;
+	}
+	return s;
+}
+
+/* a readable caret at s: ^^ (escaped) or a lone ^ at the end; its byte length, 0 when s is not one */
+static int ChatCaretLen(const char* s)
+{
+	if (s[0] != '^')
+	{
+		return 0;
+	}
+	return s[1] == '^' ? 2 : 1;
+}
+
+/*
+Readable text of 'part' against the one of 'full', colour codes ignored on
+both sides. With 'shortened' the match also succeeds when at least 32 readable
+bytes of 'full' were matched and 'part' ended first: xq3osp servers cut a long
+be_name down to the short name's budget in the chat lines
+*/
+static qboolean ChatNameMatches(const char* part, const char* full, qboolean shortened)
+{
+	int matched = 0;
+
+	while (qtrue)
+	{
+		int caretPart, caretFull;
+
+		part = ChatSkipColors(part);
+		full = ChatSkipColors(full);
+		if (!part[0] || !full[0])
+		{
+			break;
+		}
+		caretPart = ChatCaretLen(part);
+		caretFull = ChatCaretLen(full);
+		if (caretPart || caretFull)
+		{
+			/* a caret is one readable character however it is spelled */
+			if (!caretPart || !caretFull)
+			{
+				return qfalse;
+			}
+			part += caretPart;
+			full += caretFull;
+			matched++;
+			continue;
+		}
+		if (ChatLower((unsigned char)part[0]) != ChatLower((unsigned char)full[0]))
+		{
+			return qfalse;
+		}
+		part++;
+		full++;
+		matched++;
+	}
+
+	if (part[0] == 0 && full[0] == 0)
+	{
+		return qtrue;
+	}
+	return shortened && part[0] == 0 && matched >= 32;
+}
+
+/* readable text of a name into out; returns its length */
+static int ChatReadableCopy(const char* in, char* out, int outSize)
+{
+	int o = 0;
+
+	while (in[0] && o < outSize - 1)
+	{
+		int len;
+
+		in = ChatSkipColors(in);
+		if (!in[0])
+		{
+			break;
+		}
+		len = ChatCaretLen(in);
+		if (len)
+		{
+			out[o++] = '^';
+			in += len;
+			continue;
+		}
+		out[o++] = *in++;
+	}
+	out[o] = 0;
+
+	return o;
+}
+
 int CG_ChatClientNumFromSenderName(const char* senderName)
 {
 	int i;
-	char cleanSender[MAX_QPATH];
-	char cleanCompare[MAX_QPATH];
 	clientInfo_t* ci;
 
 	if (!senderName || !senderName[0])
@@ -264,8 +407,23 @@ int CG_ChatClientNumFromSenderName(const char* senderName)
 		return i;
 	}
 
-	Q_strncpyz(cleanSender, senderName, sizeof(cleanSender));
-	CG_RemoveChatEscapeCharAll(cleanSender);
+	/* exact: coded (older servers name the sender in the player string's form) or
+	   by readable text (xq3osp chat lines carry the name without colour codes) */
+	for (i = 0; i < MAX_CLIENTS; i++)
+	{
+		ci = &cgs.clientinfo[i];
+		if (!ci->infoValid)
+		{
+			continue;
+		}
+
+		if (Q_stricmp(ci->name, senderName) == 0 || Q_stricmp(ci->name_original, senderName) == 0 ||
+		        ChatNameMatches(senderName, ci->name, qfalse) ||
+		        ChatNameMatches(senderName, ci->name_original, qfalse))
+		{
+			return i;
+		}
+	}
 
 	for (i = 0; i < MAX_CLIENTS; i++)
 	{
@@ -275,21 +433,8 @@ int CG_ChatClientNumFromSenderName(const char* senderName)
 			continue;
 		}
 
-		if (Q_stricmp(ci->name, senderName) == 0 || Q_stricmp(ci->name_original, senderName) == 0)
-		{
-			return i;
-		}
-
-		Q_strncpyz(cleanCompare, ci->name, sizeof(cleanCompare));
-		CG_RemoveChatEscapeCharAll(cleanCompare);
-		if (Q_stricmp(cleanCompare, cleanSender) == 0)
-		{
-			return i;
-		}
-
-		Q_strncpyz(cleanCompare, ci->name_original, sizeof(cleanCompare));
-		CG_RemoveChatEscapeCharAll(cleanCompare);
-		if (Q_stricmp(cleanCompare, cleanSender) == 0)
+		if (ChatNameMatches(senderName, ci->name, qtrue) ||
+		        ChatNameMatches(senderName, ci->name_original, qtrue))
 		{
 			return i;
 		}
@@ -327,6 +472,18 @@ messageAllowed_t CG_ChatCheckMessageAllowed(const char* message)
 	}
 
 	target = CG_ChatfilterFindName(name);
+
+	if (!target)
+	{
+		/* a long be_name is cut in the chat lines: look the sender up as a
+		   client and test the names the player string carries */
+		int clientNum = CG_ChatClientNumFromSenderName(name);
+
+		if (clientNum >= 0)
+		{
+			target = CG_ChatfilterFindName(cgs.clientinfo[clientNum].name_original);
+		}
+	}
 
 	return target == NULL ? MESSAGE_ALLOWED_PLAYER : MESSAGE_NOTALLOWED;
 }

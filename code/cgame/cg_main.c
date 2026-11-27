@@ -86,7 +86,7 @@ itemInfo_t          cg_items[MAX_ITEMS];
 
 
 vmCvar_t           osp_client;
-vmCvar_t           cg_xName;
+vmCvar_t           cg_beName;
 vmCvar_t           osp_hidden;
 vmCvar_t           osp_debug;
 vmCvar_t           cg_autoswitch;
@@ -661,7 +661,7 @@ cgFontIndices_t cgFontIndices;
 cvarTable_t cvarTable[] =
 {
 	{ &osp_client, "osp_client", XSTRINGIFY(OSP_CLIENT), CVAR_USERINFO | CVAR_ROM },
-	{ &cg_xName, "x_name", "", CVAR_USERINFO | CVAR_ARCHIVE },
+	{ &cg_beName, "be_name", "", CVAR_USERINFO | CVAR_ARCHIVE },
 	{ &osp_hidden, "osp_print_issues", "0", CVAR_ARCHIVE },
 	{ &osp_debug, "osp_debug", "0", CVAR_ARCHIVE },
 	{ &cg_autoswitch, "cg_autoswitch", "0", CVAR_ARCHIVE },
@@ -2711,8 +2711,8 @@ const char* CG_ConfigString(int index)
 =================
 CG_ConfigStringName
 
-Player name from a CS_PLAYERS configstring: prefers the extended "xn" name
-(xq3osp servers, sourced from the client's x_name userinfo key, up to 512 chars)
+Player name from a CS_PLAYERS configstring: prefers the extended "bn" name
+(xq3osp servers, sourced from the client's be_name userinfo key, up to 512 chars)
 and falls back to the legacy "n" key on plain servers.
 =================
 */
@@ -2720,16 +2720,184 @@ const char* CG_ConfigStringName(const char* info)
 {
 	const char* v;
 
-	/* plain servers never send "xn": skip the extra info scan (per-frame callers) */
-	if (cgs.serverHasXName)
+	/* plain servers never send "bn": skip the extra info scan (per-frame callers) */
+	if (cgs.serverHasBEName)
 	{
-		v = Info_ValueForKey(info, "xn");
+		v = Info_ValueForKey(info, "bn");
 		if (v[0])
 		{
 			return v;
 		}
 	}
 	return Info_ValueForKey(info, "n");
+}
+
+#define BENAME_SYNC_CHARS  32  // readable characters kept in the "name" cvar: the classic name limit
+
+/*
+=================
+CG_BENameIsHex
+=================
+*/
+static qboolean CG_BENameIsHex(int c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/*
+=================
+CG_BENameCharLen
+
+Byte length of the readable character at s: its whole UTF-8 sequence, or 1
+when s does not start a valid one
+=================
+*/
+static int CG_BENameCharLen(const char* s)
+{
+	if ((s[0] & 0xE0) == 0xC0)
+	{
+		return ((s[1] & 0xC0) == 0x80) ? 2 : 1;
+	}
+	if ((s[0] & 0xF0) == 0xE0)
+	{
+		return ((s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) ? 3 : 1;
+	}
+	if ((s[0] & 0xF8) == 0xF0)
+	{
+		return ((s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) ? 4 : 1;
+	}
+	return 1;
+}
+
+/*
+=================
+CG_BENamePlain
+
+Copies the readable characters of in (at most BENAME_SYNC_CHARS, a multi-byte
+UTF-8 character is never split) without the hex colour codes. Without palette
+the other ^ codes are dropped as well; with it they are kept — a palette code
+means the same in a name and in a be_name, the hex ones do not. A readable
+caret is written escaped: the result is a colour-coded string.
+=================
+*/
+static void CG_BENamePlain(const char* in, char* out, int outSize, qboolean palette)
+{
+	int i, o, chars, len;
+
+	i = o = chars = 0;
+	while (in[i] && chars < BENAME_SYNC_CHARS)
+	{
+		if (in[i] == '^' && in[i + 1])
+		{
+			if ((in[i + 1] == 'x' || in[i + 1] == 'X') &&
+				CG_BENameIsHex(in[i + 2]) && CG_BENameIsHex(in[i + 3]) && CG_BENameIsHex(in[i + 4]) &&
+				CG_BENameIsHex(in[i + 5]) && CG_BENameIsHex(in[i + 6]) && CG_BENameIsHex(in[i + 7]))
+			{
+				i += 8;                 // hex colour code
+				continue;
+			}
+			if (in[i + 1] != '^')
+			{
+				i += 2;
+				if (!palette)
+				{
+					continue;           // a palette code is not a readable character
+				}
+				if (o + 2 > outSize - 1)
+				{
+					break;
+				}
+				out[o++] = in[i - 2];
+				out[o++] = in[i - 1];
+				continue;
+			}
+			// ^^ is an escaped caret: one readable character
+		}
+		if (in[i] == '^')
+		{
+			// written escaped, also when it trails the string alone
+			if (o + 2 > outSize - 1)
+			{
+				break;
+			}
+			out[o++] = '^';
+			out[o++] = '^';
+			i += in[i + 1] ? 2 : 1;
+			chars++;
+			continue;
+		}
+		len = CG_BENameCharLen(in + i);
+		if (o + len > outSize - 1)
+		{
+			break;                      // the character does not fit whole
+		}
+		memcpy(out + o, in + i, len);
+		o += len;
+		i += len;
+		chars++;
+	}
+	out[o] = 0;
+}
+
+/*
+=================
+CG_SyncBEName
+
+Keeps the readable text of "name" equal to the one of "be_name" while be_name
+is set: the legacy cvar is what the engine's own listings (status), the menus
+and servers without be_name support still show. be_name wins when both change
+at once; with an empty be_name "name" is left on its own (legacy behaviour).
+=================
+*/
+void CG_SyncBEName(void)
+{
+	// be_name is read whole: a cut inside a hex code would leak its digits as text
+	static char lastBEName[MAX_STRING_CHARS];
+	static char lastName[MAX_CVAR_VALUE_STRING];
+	char beName[MAX_STRING_CHARS];
+	char name[MAX_CVAR_VALUE_STRING];
+	char readable[BENAME_SYNC_CHARS * 4 + 1];
+	qboolean beChanged, nChanged;
+
+	trap_Cvar_VariableStringBuffer("be_name", beName, sizeof(beName));
+	trap_Cvar_VariableStringBuffer("name", name, sizeof(name));
+
+	beChanged = strcmp(lastBEName, beName) != 0;
+	nChanged = strcmp(lastName, name) != 0;
+	Q_strncpyz(lastBEName, beName, sizeof(lastBEName));
+	Q_strncpyz(lastName, name, sizeof(lastName));
+
+	if (!beChanged && !nChanged)
+	{
+		return;
+	}
+	if (!beName[0])
+	{
+		return;       // no be_name: the plain "name" cvar is on its own
+	}
+
+	CG_BENamePlain(beName, readable, sizeof(readable), qfalse);
+
+	if (beChanged)
+	{
+		if (readable[0] && strcmp(name, readable))
+		{
+			trap_Cvar_Set("name", readable);
+		}
+	}
+	else if (nChanged)
+	{
+		char other[BENAME_SYNC_CHARS * 4 + 1];
+		char beNameNew[MAX_STRING_CHARS];
+
+		// "name" was changed on this client (console, menu): follow it
+		CG_BENamePlain(name, other, sizeof(other), qfalse);
+		if (Q_stricmp(other, readable))
+		{
+			CG_BENamePlain(name, beNameNew, sizeof(beNameNew), qtrue);
+			trap_Cvar_Set("be_name", beNameNew);
+		}
+	}
 }
 
 //==================================================================
